@@ -22,6 +22,16 @@ import kotlin.time.Instant
  *  with an entry for each item in the transaction response data, including "transaction_data_hash".
  * @property zkSystemSpecId the ZK system spec identifier used when [zkpUsed] is `true`, or `null`.
  */
+/**
+ * A DOB interval established by a successfully verified ZK proof.
+ *
+ * These are public policy bounds, not the holder's date of birth.
+ */
+data class VerifiedDobPredicate(
+    val lowerBound: String,
+    val upperBound: String,
+)
+
 data class MdocVerifiedPresentation(
     override val documentSignerCertChain: X509CertChain,
     override val issuerSignedClaims: List<MdocClaim>,
@@ -37,6 +47,7 @@ data class MdocVerifiedPresentation(
     override val transactionData: List<TransactionData<*>>,
     override val revocationStatus: RevocationStatus? = null,
     val zkSystemSpecId: String? = null,
+    val verifiedDobPredicates: List<VerifiedDobPredicate> = emptyList(),
     override val docRequestIds: List<Int>? = null,
     override val keyBound: Boolean = true,
 ): VerifiedPresentation()

@@ -77,6 +77,46 @@ internal interface LongfellowCLibrary : Library {
         zk_spec: JnaZkSpecStruct
     ): Int
 
+    // DOB-only proof generation with inclusive public date bounds.
+    fun run_mdoc_prover_dob(
+        bcp: ByteArray,
+        bcsz: NativeLong,
+        mdoc: ByteArray,
+        mdoc_len: NativeLong,
+        pkx: String,
+        pky: String,
+        transcript: ByteArray,
+        tr_len: NativeLong,
+        attrs: JnaRequestedAttribute?,
+        attrs_len: NativeLong,
+        now: String,
+        prf: PointerByReference,
+        proof_len: NativeLongByReference,
+        doc_type: String,
+        zk_spec: JnaZkSpecStruct,
+        cutoff: String,
+        earliest: String
+    ): Int
+
+    // DOB-only proof verification; no actual DOB is supplied.
+    fun run_mdoc_verifier_dob(
+        bcp: ByteArray,
+        bcsz: NativeLong,
+        pkx: String,
+        pky: String,
+        transcript: ByteArray,
+        tr_len: NativeLong,
+        attrs: JnaRequestedAttribute?,
+        attrs_len: NativeLong,
+        now: String,
+        zkproof: ByteArray,
+        proof_len: NativeLong,
+        doc_type: String,
+        zk_spec: JnaZkSpecStruct,
+        cutoff: String,
+        earliest: String
+    ): Int
+
     fun generate_circuit(
         zk_spec: JnaZkSpecStruct,
         cb: PointerByReference,

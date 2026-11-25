@@ -309,3 +309,7 @@ a number of samples for different platforms.
 ## Note
 
 This is not an official or supported Google product.
+
+## DOB-only extension
+
+[DOB-only implementation](README_DOB.md)

@@ -335,3 +335,303 @@ pub unsafe extern "C" fn find_zk_spec_by_attributes(
         -1
     }
 }
+
+// Dedicated DOB-only circuit configuration.
+// Never select this circuit using only version and attribute count.
+const DOB_CIRCUIT_ID: &str =
+    "b603047bcc80a2cc2d4e7932852a60b41134ae87dfe10290655c4d6591c88926";
+
+fn dob_spec_from_c(
+    ptr: *const ZkSpecStructC,
+) -> Option<mdoc_zk_runtime::ZkSpecStruct> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    let c = unsafe { &*ptr };
+
+    if c.version != 8
+        || c.num_attributes != 1
+        || c.block_enc_hash != 5264
+        || c.block_enc_sig != 4445
+        || c.circuit_hash[64] != 0
+    {
+        return None;
+    }
+
+    let id_bytes: Vec<u8> = c.circuit_hash[..64]
+        .iter()
+        .map(|&b| b as u8)
+        .collect();
+
+    let id = std::str::from_utf8(&id_bytes).ok()?;
+
+    if !id.eq_ignore_ascii_case(DOB_CIRCUIT_ID) {
+        return None;
+    }
+
+    let mut spec = CURRENT_ZK_SPECS[0];
+    spec.version = 8;
+    spec.num_attributes = 1;
+
+    spec.ligero_hash.rateinv = 7;
+    spec.ligero_hash.nreq = 132;
+    spec.ligero_hash.block_enc = 5264;
+
+    spec.ligero_sig.rateinv = 7;
+    spec.ligero_sig.nreq = 132;
+    spec.ligero_sig.block_enc = 4445;
+
+    for i in 0..32 {
+        spec.combined_hash[i] =
+            u8::from_str_radix(&DOB_CIRCUIT_ID[2*i..2*i+2], 16).ok()?;
+    }
+
+    Some(spec)
+}
+
+unsafe fn parse_dob_bound(ptr: *const c_char) -> Option<[u8; 10]> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    let b = CStr::from_ptr(ptr).to_bytes();
+
+    if b.len() != 10
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || ![0, 1, 2, 3, 5, 6, 8, 9]
+            .iter()
+            .all(|&i| b[i].is_ascii_digit())
+    {
+        return None;
+    }
+
+    let year: u32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+
+    if day == 0 || day > max_day {
+        return None;
+    }
+
+    b.try_into().ok()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn run_mdoc_prover_dob(
+    bcp: *const u8,
+    bcsz: usize,
+    mdoc: *const u8,
+    mdoc_len: usize,
+    pkx: *const c_char,
+    pky: *const c_char,
+    transcript: *const u8,
+    tr_len: usize,
+    attrs: *const RequestedAttributeC,
+    attrs_len: usize,
+    now: *const c_char,
+    prf: *mut *mut u8,
+    proof_len: *mut usize,
+    doc_type: *const c_char,
+    zk_spec: *const ZkSpecStructC,
+    cutoff: *const c_char,
+    earliest: *const c_char,
+) -> i32 {
+    if cutoff.is_null() || earliest.is_null() {
+        return MdocProverErrorCode::NullInput as i32;
+    }
+    if bcp.is_null() || mdoc.is_null() || pkx.is_null() || pky.is_null()
+        || transcript.is_null() || attrs.is_null() || now.is_null()
+        || prf.is_null() || proof_len.is_null() || doc_type.is_null() || zk_spec.is_null() {
+        return MdocProverErrorCode::NullInput as i32;
+    }
+
+    let spec = match dob_spec_from_c(zk_spec) {
+        Some(s) => s,
+        None => return MdocProverErrorCode::InvalidZkSpecVersion as i32,
+    };
+
+    let pkx_str = match CStr::from_ptr(pkx).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocProverErrorCode::InvalidInput as i32,
+    };
+    let pky_str = match CStr::from_ptr(pky).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocProverErrorCode::InvalidInput as i32,
+    };
+    let now_str = match CStr::from_ptr(now).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocProverErrorCode::InvalidInput as i32,
+    };
+    let doc_type_str = match CStr::from_ptr(doc_type).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocProverErrorCode::InvalidInput as i32,
+    };
+
+    let cutoff = match parse_dob_bound(cutoff) {
+        Some(v) => v,
+        None => return MdocProverErrorCode::InvalidInput as i32,
+    };
+    let earliest = match parse_dob_bound(earliest) {
+        Some(v) => v,
+        None => return MdocProverErrorCode::InvalidInput as i32,
+    };
+    if cutoff > earliest {
+        return MdocProverErrorCode::InvalidInput as i32;
+    }
+
+    let circuit_slice = slice::from_raw_parts(bcp, bcsz);
+    let mdoc_slice = slice::from_raw_parts(mdoc, mdoc_len);
+    let transcript_slice = slice::from_raw_parts(transcript, tr_len);
+    let c_attrs = slice::from_raw_parts(attrs, attrs_len);
+
+    let mut rust_attrs = Vec::with_capacity(attrs_len);
+    for a in c_attrs {
+        let ns_len = a.namespace_len.min(64);
+        let id_len = a.id_len.min(32);
+        let val_len = a.cbor_value_len.min(64);
+        rust_attrs.push(RequestedAttribute {
+            namespace_id: a.namespace_id[..ns_len].to_vec(),
+            id: a.id[..id_len].to_vec(),
+            cbor_value: a.cbor_value[..val_len].to_vec(),
+        });
+    }
+
+    let mut rng = runtime_random::SecureRandomEngine::new();
+
+    match mdoc_zk_runtime::run_mdoc_prover_inner_with_birthdate(
+        &spec,
+        circuit_slice,
+        mdoc_slice,
+        pkx_str,
+        pky_str,
+        transcript_slice,
+        &rust_attrs,
+        now_str,
+        doc_type_str,
+        &cutoff,
+        &earliest,
+        &mut rng,
+    ) {
+        Ok(proof_vec) => {
+            let len = proof_vec.len();
+            let dest = libc::malloc(len) as *mut u8;
+            if dest.is_null() {
+                return MdocProverErrorCode::MemoryAllocationFailure as i32;
+            }
+            std::ptr::copy_nonoverlapping(proof_vec.as_ptr(), dest, len);
+            *prf = dest;
+            *proof_len = len;
+            MdocProverErrorCode::Success as i32
+        }
+        Err(err) => err as i32,
+    }
+}
+
+
+#[no_mangle]
+pub unsafe extern "C" fn run_mdoc_verifier_dob(
+    bcp: *const u8,
+    bcsz: usize,
+    pkx: *const c_char,
+    pky: *const c_char,
+    transcript: *const u8,
+    tr_len: usize,
+    attrs: *const RequestedAttributeC,
+    attrs_len: usize,
+    now: *const c_char,
+    zkproof: *const u8,
+    proof_len: usize,
+    doc_type: *const c_char,
+    zk_spec: *const ZkSpecStructC,
+    cutoff: *const c_char,
+    earliest: *const c_char,
+) -> i32 {
+    if cutoff.is_null() || earliest.is_null() {
+        return MdocVerifierErrorCode::NullInput as i32;
+    }
+    if bcp.is_null() || pkx.is_null() || pky.is_null()
+        || transcript.is_null() || attrs.is_null() || now.is_null()
+        || zkproof.is_null() || doc_type.is_null() || zk_spec.is_null() {
+        return MdocVerifierErrorCode::NullInput as i32;
+    }
+
+    let spec = match dob_spec_from_c(zk_spec) {
+        Some(s) => s,
+        None => return MdocVerifierErrorCode::InvalidZkSpecVersion as i32,
+    };
+
+    let pkx_str = match CStr::from_ptr(pkx).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+    let pky_str = match CStr::from_ptr(pky).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+    let now_str = match CStr::from_ptr(now).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+    let doc_type_str = match CStr::from_ptr(doc_type).to_str() {
+        Ok(s) => s,
+        Err(_) => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+
+    let cutoff = match parse_dob_bound(cutoff) {
+        Some(v) => v,
+        None => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+    let earliest = match parse_dob_bound(earliest) {
+        Some(v) => v,
+        None => return MdocVerifierErrorCode::InvalidInput as i32,
+    };
+    if cutoff > earliest {
+        return MdocVerifierErrorCode::InvalidInput as i32;
+    }
+
+    let circuit_slice = slice::from_raw_parts(bcp, bcsz);
+    let transcript_slice = slice::from_raw_parts(transcript, tr_len);
+    let proof_slice = slice::from_raw_parts(zkproof, proof_len);
+    let c_attrs = slice::from_raw_parts(attrs, attrs_len);
+
+    let mut rust_attrs = Vec::with_capacity(attrs_len);
+    for a in c_attrs {
+        let ns_len = a.namespace_len.min(64);
+        let id_len = a.id_len.min(32);
+        let val_len = a.cbor_value_len.min(64);
+        rust_attrs.push(RequestedAttribute {
+            namespace_id: a.namespace_id[..ns_len].to_vec(),
+            id: a.id[..id_len].to_vec(),
+            cbor_value: a.cbor_value[..val_len].to_vec(),
+        });
+    }
+
+    match mdoc_zk_runtime::run_mdoc_verifier_inner_with_birthdate(
+        &spec,
+        circuit_slice,
+        pkx_str,
+        pky_str,
+        transcript_slice,
+        &rust_attrs,
+        now_str,
+        doc_type_str,
+        proof_slice,
+        &cutoff,
+        &earliest,
+    ) {
+        Ok(()) => MdocVerifierErrorCode::Success as i32,
+        Err(err) => err as i32,
+    }
+}

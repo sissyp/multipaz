@@ -1498,6 +1498,31 @@ object VerificationUtil {
                     if (namespace == ISO_18013_TRANSACTION_DATA_NAMESPACE) {
                         return presentation.transactionData.any { it.type.identifier == elementName }
                     }
+                    // DOB interval verification satisfies only an
+                    // explicitly requested birth_date predicate.
+                    if (presentation.zkpUsed &&
+                        presentation.verifiedDobPredicates.isNotEmpty() &&
+                        namespace == "org.iso.18013.5.1" &&
+                        elementName == "birth_date" &&
+                        presentation.docType == "org.iso.18013.5.1.mDL"
+                    ) {
+                        val dobCircuitHash =
+                            "b603047bcc80a2cc2d4e7932852a60b41134ae87dfe10290655c4d6591c88926"
+
+                        val matchingSpecs = zkRequest?.systemSpecs.orEmpty().filter { spec ->
+                            spec.id == presentation.zkSystemSpecId &&
+                            spec.getParam<String>("circuit_hash") == dobCircuitHash
+                        }
+
+                        return matchingSpecs.size == 1 &&
+                            presentation.verifiedDobPredicates.any { predicate ->
+                                matchingSpecs.single().getParam<String>("dob_cutoff") ==
+                                    predicate.lowerBound &&
+                                matchingSpecs.single().getParam<String>("dob_earliest") ==
+                                    predicate.upperBound
+                            }
+                    }
+
                     if (isMdlAgeOverElement(presentation.docType, namespace, elementName)) {
                         return presentation.issuerSignedClaims.any { claim ->
                             if (claim.namespaceName != MDL_NAMESPACE) return@any false
@@ -1669,6 +1694,55 @@ object VerificationUtil {
             val zkSystemSpec = requestZkSystemSpec ?: zkSystemRepository?.getAllZkSystemSpecs()?.find {
                 it.id == zkDocument.documentData.zkSystemSpecId
             } ?: throw IllegalStateException("Zk System '${zkDocument.documentData.zkSystemSpecId}' was not found.")
+
+            // DOB proof acceptance must be tied to the verifier's
+            // explicit DeviceRequest, never repository-only fallback.
+            val dobCircuitHash =
+                "b603047bcc80a2cc2d4e7932852a60b41134ae87dfe10290655c4d6591c88926"
+
+            val verifiedDobPredicates = if (
+                zkSystemSpec.getParam<String>("circuit_hash") == dobCircuitHash
+            ) {
+                val matchingRequests = request?.docRequests?.filter { docReq ->
+                    docReq.docType == "org.iso.18013.5.1.mDL" &&
+                    docReq.nameSpaces["org.iso.18013.5.1"]
+                        ?.containsKey("birth_date") == true &&
+                    docReq.docRequestInfo?.zkRequest?.systemSpecs?.any { spec ->
+                        spec.id == zkSystemSpec.id &&
+                        spec.getParam<String>("circuit_hash") == dobCircuitHash
+                    } == true &&
+                    (zkDocument.docRequestIds == null ||
+                        docReq.docRequestId in zkDocument.docRequestIds)
+                }.orEmpty()
+
+                if (matchingRequests.size != 1 ||
+                    requestZkSystemSpec == null
+                ) {
+                    throw ProofVerificationFailureException(
+                        "DOB proof requires exactly one matching verifier request"
+                    )
+                }
+
+                val lowerBound = requestZkSystemSpec.getParam<String>("dob_cutoff")
+                    ?: throw ProofVerificationFailureException(
+                        "DOB request is missing dob_cutoff"
+                    )
+
+                val upperBound = requestZkSystemSpec.getParam<String>("dob_earliest")
+                    ?: throw ProofVerificationFailureException(
+                        "DOB request is missing dob_earliest"
+                    )
+
+                listOf(
+                    VerifiedDobPredicate(
+                        lowerBound = lowerBound,
+                        upperBound = upperBound
+                    )
+                )
+            } else {
+                emptyList()
+            }
+
             zkSystemRepository?.lookup(zkSystemSpec.system)
                 ?.verifyProof(
                     zkDocument = zkDocument,
@@ -1729,6 +1803,7 @@ object VerificationUtil {
                     vpTokenIdentifier = vpTokenIdentifier,
                     transactionData = listOf(),  // No transactions for ZKP
                     zkSystemSpecId = zkDocument.documentData.zkSystemSpecId,
+                    verifiedDobPredicates = verifiedDobPredicates,
                     docRequestIds = zkDocument.docRequestIds,
                 )
             )

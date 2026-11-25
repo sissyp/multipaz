@@ -176,6 +176,37 @@ MdocVerifierErrorCode run_mdoc_verifier(
     const uint8_t* zkproof, size_t proof_len, const char* docType,
     const ZkSpecStruct* zk_spec_version);
 
+// DOB-only proof generation.
+// Both date bounds use YYYY-MM-DD and are inclusive.
+// The supplied circuit must match the pinned DOB-only circuit ID.
+MdocProverErrorCode run_mdoc_prover_dob(
+    const uint8_t* bcp, size_t bcsz,
+    const uint8_t* mdoc, size_t mdoc_len,
+    const char* pkx, const char* pky,
+    const uint8_t* transcript, size_t tr_len,
+    const RequestedAttribute* attrs, size_t attrs_len,
+    const char* now,
+    uint8_t** prf, size_t* proof_len,
+    const char* docType,
+    const ZkSpecStruct* zk_spec_version,
+    const char* cutoff,
+    const char* earliest);
+
+// DOB-only proof verification.
+// The actual DOB is not supplied to the verifier.
+// Bounds must match those used to generate the proof.
+MdocVerifierErrorCode run_mdoc_verifier_dob(
+    const uint8_t* bcp, size_t bcsz,
+    const char* pkx, const char* pky,
+    const uint8_t* transcript, size_t tr_len,
+    const RequestedAttribute* attrs, size_t attrs_len,
+    const char* now,
+    const uint8_t* zkproof, size_t proof_len,
+    const char* docType,
+    const ZkSpecStruct* zk_spec_version,
+    const char* cutoff,
+    const char* earliest);
+
 // Produces a compressed version of the circuit bytes for the specified number
 // of attributes. The generator only supports the latest version of the ZKSpec
 // for a number of attributes. Attempt to generate older circuits will result in

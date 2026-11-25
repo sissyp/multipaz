@@ -140,6 +140,96 @@ internal actual object LongfellowNatives {
         )
     }
 
+    actual fun runMdocProverDob(
+        circuit: ByteString,
+        circuitSize: Int,
+        mdoc: ByteString,
+        mdocSize: Int,
+        pkx: String,
+        pky: String,
+        transcript: ByteString,
+        transcriptSize: Int,
+        now: String,
+        docType: String,
+        zkSpec: LongfellowZkSystemSpec,
+        statements: List<NativeAttribute>,
+        cutoff: String,
+        earliest: String
+    ): ByteArray {
+        val spec = toJnaSpec(zkSpec)
+        val jnaAttrs = toJnaAttributes(statements)
+        val prfRef = PointerByReference()
+        val proofLenRef = NativeLongByReference()
+
+        val rc = LongfellowCLibrary.instance.run_mdoc_prover_dob(
+            bcp = circuit.toByteArray(),
+            bcsz = NativeLong(circuitSize.toLong()),
+            mdoc = mdoc.toByteArray(),
+            mdoc_len = NativeLong(mdocSize.toLong()),
+            pkx = pkx,
+            pky = pky,
+            transcript = transcript.toByteArray(),
+            tr_len = NativeLong(transcriptSize.toLong()),
+            attrs = jnaAttrs,
+            attrs_len = NativeLong(statements.size.toLong()),
+            now = now,
+            prf = prfRef,
+            proof_len = proofLenRef,
+            doc_type = docType,
+            zk_spec = spec,
+            cutoff = cutoff,
+            earliest = earliest
+        )
+
+        if (rc != LongfellowCLibrary.MDOC_PROVER_SUCCESS) {
+            throw ProofGenerationException("Proof generation failed with error code $rc")
+        }
+
+        val proofPtr = prfRef.value
+        val proofLen = proofLenRef.value.toInt()
+        val proofBytes = proofPtr.getByteArray(0, proofLen)
+        LongfellowCLibrary.instance.free_mdoc_proof(proofPtr, proofLenRef.value)
+        return proofBytes
+    }
+
+    actual fun runMdocVerifierDob(
+        circuit: ByteString,
+        circuitSize: Int,
+        pkx: String,
+        pky: String,
+        transcript: ByteString,
+        transcriptSize: Int,
+        now: String,
+        proof: ByteString,
+        proofSize: Int,
+        docType: String,
+        zkSpec: LongfellowZkSystemSpec,
+        statements: Array<NativeAttribute>,
+        cutoff: String,
+        earliest: String
+    ): Int {
+        val spec = toJnaSpec(zkSpec)
+        val jnaAttrs = toJnaAttributes(statements.toList())
+
+        return LongfellowCLibrary.instance.run_mdoc_verifier_dob(
+            bcp = circuit.toByteArray(),
+            bcsz = NativeLong(circuitSize.toLong()),
+            pkx = pkx,
+            pky = pky,
+            transcript = transcript.toByteArray(),
+            tr_len = NativeLong(transcriptSize.toLong()),
+            attrs = jnaAttrs,
+            attrs_len = NativeLong(statements.size.toLong()),
+            now = now,
+            zkproof = proof.toByteArray(),
+            proof_len = NativeLong(proofSize.toLong()),
+            doc_type = docType,
+            zk_spec = spec,
+            cutoff = cutoff,
+            earliest = earliest
+        )
+    }
+
     private fun toJnaSpec(zkSpec: LongfellowZkSystemSpec): JnaZkSpecStruct {
         val spec = JnaZkSpecStruct()
         spec.system = zkSpec.system

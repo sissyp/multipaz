@@ -36,4 +36,39 @@ internal expect object LongfellowNatives {
         zkSpec: LongfellowZkSystemSpec,
         statements: Array<NativeAttribute>
     ): Int
+
+    fun runMdocProverDob(
+        circuit: ByteString,
+        circuitSize: Int,
+        mdoc: ByteString,
+        mdocSize: Int,
+        pkx: String,
+        pky: String,
+        transcript: ByteString,
+        transcriptSize: Int,
+        now: String,
+        docType: String,
+        zkSpec: LongfellowZkSystemSpec,
+        statements: List<NativeAttribute>,
+        cutoff: String,
+        earliest: String
+    ): ByteArray
+
+    fun runMdocVerifierDob(
+        circuit: ByteString,
+        circuitSize: Int,
+        pkx: String,
+        pky: String,
+        transcript: ByteString,
+        transcriptSize: Int,
+        now: String,
+        proof: ByteString,
+        proofSize: Int,
+        docType: String,
+        zkSpec: LongfellowZkSystemSpec,
+        statements: Array<NativeAttribute>,
+        cutoff: String,
+        earliest: String
+    ): Int
+
 }

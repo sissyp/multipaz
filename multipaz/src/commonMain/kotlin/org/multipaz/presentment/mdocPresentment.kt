@@ -425,9 +425,6 @@ internal suspend fun mdocPresentmentGenerateResponseInternal(
                     )
 
                     if (zkSystemMatch != null) {
-                        if (Logger.isDebugEnabled) {
-                            Logger.dCbor(TAG, "Generating ZKP proof for document", document.toDataItem())
-                        }
                         val zkDocument = zkSystemMatch.generateProof(
                             zkSystemSpec = zkSystemSpec!!,
                             document = document,

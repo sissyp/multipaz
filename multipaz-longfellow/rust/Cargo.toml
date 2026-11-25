@@ -18,7 +18,8 @@ name = "zkp"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-mdoc-zk-runtime = { path = "longfellow-zk/rust/applications/mdoc_zk/runtime" }
+mdoc-zk-runtime = { git = "https://github.com/sissyp/longfellow-zk.git", rev = "52439cece7392751b812782bab231e1ca80bc694" }
+runtime-random = { git = "https://github.com/sissyp/longfellow-zk.git", rev = "52439cece7392751b812782bab231e1ca80bc694" }
 libc = "0.2"
 zstd = "0.13"
 

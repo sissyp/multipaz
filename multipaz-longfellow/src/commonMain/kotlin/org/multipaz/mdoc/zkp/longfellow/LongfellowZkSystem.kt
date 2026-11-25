@@ -1,5 +1,6 @@
 package org.multipaz.mdoc.zkp.longfellow
 
+import org.multipaz.request.MdocRequestedClaim
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
@@ -48,6 +49,8 @@ class LongfellowZkSystem(): ZkSystem {
 
     companion object {
         private const val TAG = "LongfellowZkSystem"
+        private const val DOB_CIRCUIT_HASH =
+            "b603047bcc80a2cc2d4e7932852a60b41134ae87dfe10290655c4d6591c88926"
 
         // Matches the numeric error code in the native prover's message
         private val errorCodeRegex = Regex("""\d+""")
@@ -144,12 +147,38 @@ class LongfellowZkSystem(): ZkSystem {
         return Pair(spec, longfellowSpec)
     }
 
+
+    private fun isDobRequest(spec: ZkSystemSpec): Boolean =
+        spec.getParam<String>("circuit_hash") == DOB_CIRCUIT_HASH
+
+    private fun dobBounds(spec: ZkSystemSpec): Pair<String, String> {
+        val cutoff = spec.getParam<String>("dob_cutoff")
+            ?: throw IllegalArgumentException("Missing dob_cutoff")
+        val earliest = spec.getParam<String>("dob_earliest")
+            ?: throw IllegalArgumentException("Missing dob_earliest")
+
+        validateDobInterval(cutoff, earliest)
+        return cutoff to earliest
+    }
+
     override fun generateProof(
         zkSystemSpec: ZkSystemSpec,
         document: MdocDocument,
         sessionTranscript: DataItem,
         timestamp: Instant
     ): ZkDocument {
+        if (isDobRequest(zkSystemSpec)) {
+            val (cutoff, earliest) = dobBounds(zkSystemSpec)
+            return generateDobProof(
+                zkSystemSpec = zkSystemSpec,
+                document = document,
+                sessionTranscript = sessionTranscript,
+                timestamp = timestamp,
+                cutoff = cutoff,
+                earliest = earliest
+            )
+        }
+
         require(document.deviceAuth != null) {
             "Longfellow ZKP requires a key-bound mdoc with deviceAuth"
         }
@@ -243,6 +272,20 @@ class LongfellowZkSystem(): ZkSystem {
         atTime: Instant,
         maxTimestampDrift: Duration,
     ) {
+        if (isDobRequest(zkSystemSpec)) {
+            val (cutoff, earliest) = dobBounds(zkSystemSpec)
+            verifyDobProof(
+                zkDocument = zkDocument,
+                zkSystemSpec = zkSystemSpec,
+                sessionTranscript = sessionTranscript,
+                atTime = atTime,
+                maxTimestampDrift = maxTimestampDrift,
+                cutoff = cutoff,
+                earliest = earliest
+            )
+            return
+        }
+
         if (zkDocument.documentData.msoX5chain == null || zkDocument.documentData.msoX5chain!!.certificates.isEmpty()) {
             throw IllegalArgumentException("zkDocument must contain at least 1 certificate in msoX5chain.")
         }
@@ -313,6 +356,253 @@ class LongfellowZkSystem(): ZkSystem {
      * @param circuitBytes the bytes of the circuit file
      * @throws IllegalArgumentException if the circuitFilename is invalid
      */
+
+    private fun validateDobInterval(cutoff: String, earliest: String) {
+        val pattern = Regex("""\d{4}-\d{2}-\d{2}""")
+
+        require(pattern.matches(cutoff) && pattern.matches(earliest)) {
+            "DOB bounds must use YYYY-MM-DD"
+        }
+
+        kotlinx.datetime.LocalDate.parse(cutoff)
+        kotlinx.datetime.LocalDate.parse(earliest)
+
+        require(cutoff <= earliest) {
+            "cutoff must not be after earliest"
+        }
+    }
+
+    private fun requireDobCircuit(spec: LongfellowZkSystemSpec) {
+        require(
+            spec.circuitHash == DOB_CIRCUIT_HASH &&
+            spec.version == 8L &&
+            spec.numAttributes == 1L &&
+            spec.blockEncHash == 5264L &&
+            spec.blockEncSig == 4445L
+        ) {
+            "This operation requires the DOB-only Longfellow circuit"
+        }
+    }
+
+    /**
+     * Registers the previously compiled DOB-only circuit.
+     * The circuit bytes must correspond to the pinned circuit ID.
+     */
+    fun addDobCircuit(circuitBytes: ByteString): Boolean =
+        addCircuit(
+            "8_1_5264_4445_$DOB_CIRCUIT_HASH",
+            circuitBytes
+        )
+
+    /**
+     * Generates a DOB interval proof.
+     *
+     * The real DOB is used privately by the prover.
+     * No issuer-signed personal attributes are returned in ZkDocumentData.
+     */
+    fun generateDobProof(
+        zkSystemSpec: ZkSystemSpec,
+        document: MdocDocument,
+        sessionTranscript: DataItem,
+        timestamp: Instant,
+        cutoff: String,
+        earliest: String
+    ): ZkDocument {
+        validateDobInterval(cutoff, earliest)
+
+        require(document.deviceAuth != null) {
+            "DOB proof requires a key-bound mdoc"
+        }
+
+        val nativeSpec = getLongfellowZkSystemSpec(zkSystemSpec)
+            ?: throw IllegalArgumentException("DOB circuit not registered")
+
+        requireDobCircuit(nativeSpec)
+
+        val circuit = getCircuitBytes(zkSystemSpec)
+            ?: throw IllegalArgumentException("DOB circuit bytes not found")
+
+        val dobItem = document.issuerNamespaces.data[
+            "org.iso.18013.5.1"
+        ]?.get("birth_date")
+            ?: throw IllegalArgumentException(
+                "Issuer-signed birth_date is missing"
+            )
+
+        val encodedDob = Cbor.encode(dobItem.dataElementValue)
+
+        require(
+            encodedDob.size == 14 &&
+            encodedDob[0] == 0xd9.toByte() &&
+            encodedDob[1] == 0x03.toByte() &&
+            encodedDob[2] == 0xec.toByte() &&
+            encodedDob[3] == 0x6a.toByte()
+        ) {
+            "DOB must be a CBOR tag 1004 full-date"
+        }
+
+        val attributes = listOf(
+            NativeAttribute(
+                key = "birth_date",
+                namespace = "org.iso.18013.5.1",
+                value = encodedDob
+            )
+        )
+
+        val mdocBytes = Cbor.encode(
+            buildCborMap {
+                put("version", "1.0")
+                putCborArray("documents") {
+                    add(document.toDataItem())
+                }
+                put("status", DeviceResponse.STATUS_OK)
+            }
+        )
+
+        val certChain = document.issuerCertChain
+        val issuerCert = certChain.certificates.first()
+        val coordinates =
+            issuerCert.ecPublicKey as EcPublicKeyDoubleCoordinate
+
+        val transcript = ByteString(Cbor.encode(sessionTranscript))
+        val adjustedTimestamp = timestamp.truncateToWholeSeconds()
+
+        val proof = LongfellowNatives.runMdocProverDob(
+            circuit = circuit,
+            circuitSize = circuit.size,
+            mdoc = ByteString(mdocBytes),
+            mdocSize = mdocBytes.size,
+            pkx = getFormattedCoordinate(coordinates.x),
+            pky = getFormattedCoordinate(coordinates.y),
+            transcript = transcript,
+            transcriptSize = transcript.size,
+            now = formatDate(adjustedTimestamp),
+            docType = document.docType,
+            zkSpec = nativeSpec,
+            statements = attributes,
+            cutoff = cutoff,
+            earliest = earliest
+        )
+
+        return ZkDocument(
+            proof = ByteString(proof),
+            documentData = ZkDocumentData(
+                zkSystemSpecId = zkSystemSpec.id,
+                docType = document.docType,
+                timestamp = adjustedTimestamp,
+                issuerSigned = emptyMap(),
+                deviceSigned = emptyMap(),
+                msoX5chain = certChain
+            )
+        )
+    }
+
+    /**
+     * Verifies a DOB interval proof using verifier-controlled bounds.
+     *
+     * The real DOB is neither required nor available to the verifier.
+     *
+     * Certificate-chain trust validation is the responsibility of the caller.
+     */
+    fun verifyDobProof(
+        zkDocument: ZkDocument,
+        zkSystemSpec: ZkSystemSpec,
+        sessionTranscript: DataItem,
+        atTime: Instant,
+        maxTimestampDrift: Duration,
+        cutoff: String,
+        earliest: String
+    ) {
+        validateDobInterval(cutoff, earliest)
+
+        if (zkDocument.documentData.zkSystemSpecId != zkSystemSpec.id) {
+            throw ProofVerificationFailureException(
+                "ZK system specification ID mismatch"
+            )
+        }
+
+        if (zkDocument.documentData.issuerSigned.isNotEmpty() ||
+            zkDocument.documentData.deviceSigned.isNotEmpty()
+        ) {
+            throw ProofVerificationFailureException(
+                "DOB-only presentation must not disclose attributes"
+            )
+        }
+
+        if ((atTime - zkDocument.documentData.timestamp).absoluteValue >
+            maxTimestampDrift
+        ) {
+            throw ProofVerificationFailureException(
+                "DOB proof timestamp is outside allowed drift"
+            )
+        }
+
+        val nativeSpec = getLongfellowZkSystemSpec(zkSystemSpec)
+            ?: throw IllegalArgumentException("DOB circuit not registered")
+
+        requireDobCircuit(nativeSpec)
+
+        val circuit = getCircuitBytes(zkSystemSpec)
+            ?: throw IllegalArgumentException("DOB circuit bytes not found")
+
+        val certChain = zkDocument.documentData.msoX5chain
+            ?: throw ProofVerificationFailureException(
+                "Issuer certificate chain is missing"
+            )
+
+        if (certChain.certificates.isEmpty()) {
+            throw ProofVerificationFailureException(
+                "Issuer certificate chain is empty"
+            )
+        }
+
+        val coordinates =
+            certChain.certificates.first().ecPublicKey
+                as EcPublicKeyDoubleCoordinate
+
+        // This placeholder is not the actual DOB.
+        // The DOB circuit verifier uses public date bounds instead.
+        val dummyDob = byteArrayOf(
+            0xd9.toByte(),
+            0x03,
+            0xec.toByte(),
+            0x6a
+        ) + "1999-01-01".encodeToByteArray()
+
+        val verifierAttributes = arrayOf(
+            NativeAttribute(
+                key = "birth_date",
+                namespace = "org.iso.18013.5.1",
+                value = dummyDob
+            )
+        )
+
+        val transcript = ByteString(Cbor.encode(sessionTranscript))
+
+        val result = LongfellowNatives.runMdocVerifierDob(
+            circuit = circuit,
+            circuitSize = circuit.size,
+            pkx = getFormattedCoordinate(coordinates.x),
+            pky = getFormattedCoordinate(coordinates.y),
+            transcript = transcript,
+            transcriptSize = transcript.size,
+            now = formatDate(zkDocument.documentData.timestamp),
+            proof = zkDocument.proof,
+            proofSize = zkDocument.proof.size,
+            docType = zkDocument.documentData.docType,
+            zkSpec = nativeSpec,
+            statements = verifierAttributes,
+            cutoff = cutoff,
+            earliest = earliest
+        )
+
+        if (result != VerifierCodeEnum.MDOC_VERIFIER_SUCCESS.value) {
+            throw ProofVerificationFailureException(
+                "DOB proof verification failed with code $result"
+            )
+        }
+    }
+
     fun addCircuit(circuitFilename: String, circuitBytes: ByteString): Boolean {
         require(circuitFilename.indexOf("/") == -1) {
             "circuitFilename must not include any directory separator"
@@ -355,9 +645,60 @@ class LongfellowZkSystem(): ZkSystem {
             return null
         }
 
+
+        // The DOB circuit is selected only for an explicit birth_date
+        // request, never as a generic attribute-disclosure circuit.
+        for (reqSpec in zkSystemSpecs) {
+            if (reqSpec.system != name || !isDobRequest(reqSpec)) continue
+
+            val claim = requestedClaims.singleOrNull()
+                as? MdocRequestedClaim ?: continue
+
+            if (claim.docType != "org.iso.18013.5.1.mDL" ||
+                claim.namespaceName != "org.iso.18013.5.1" ||
+                claim.dataElementName != "birth_date"
+            ) continue
+
+            val cutoff = reqSpec.getParam<String>("dob_cutoff")
+                ?: continue
+            val earliest = reqSpec.getParam<String>("dob_earliest")
+                ?: continue
+
+            try {
+                validateDobInterval(cutoff, earliest)
+            } catch (_: IllegalArgumentException) {
+                continue
+            }
+
+            val entry = findCircuitEntry(reqSpec) ?: continue
+            val nativeSpec = entry.longfellowZkSystemSpec
+
+            if (nativeSpec.circuitHash != DOB_CIRCUIT_HASH ||
+                nativeSpec.version != 8L ||
+                nativeSpec.numAttributes != 1L ||
+                nativeSpec.blockEncHash != 5264L ||
+                nativeSpec.blockEncSig != 4445L
+            ) continue
+
+            val resolved = ZkSystemSpec(
+                id = reqSpec.id,
+                system = name
+            )
+
+            for ((key, value) in entry.zkSystemSpec.params) {
+                resolved.addParam(key, value.toDataItem())
+            }
+
+            resolved.addParam("dob_cutoff", cutoff)
+            resolved.addParam("dob_earliest", earliest)
+
+            return resolved
+        }
+
         var bestMatch: Pair<ZkSystemSpec, Long>? = null
         for (reqSpec in zkSystemSpecs) {
             if (reqSpec.system != name) continue
+            if (isDobRequest(reqSpec)) continue
             val reqCircuitHash = reqSpec.getParam<String>("circuit_hash") ?: continue
             val reqVersion = reqSpec.getParam<Long>("version")
             val reqNumAttributes = reqSpec.getParam<Long>("num_attributes")

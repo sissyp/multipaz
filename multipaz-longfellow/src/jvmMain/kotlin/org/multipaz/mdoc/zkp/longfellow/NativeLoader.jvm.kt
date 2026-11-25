@@ -4,6 +4,15 @@ import java.io.File
 
 internal actual object NativeLoader {
     actual fun loadLibrary(libraryName: String): String? {
+
+        // Optional override for local native integration tests.
+        val overridePath = System.getProperty("multipaz.longfellow.nativeLibraryPath")
+        if (!overridePath.isNullOrBlank()) {
+            require(java.io.File(overridePath).isFile) {
+                "Native Longfellow library not found: $overridePath"
+            }
+            return overridePath
+        }
         val os = System.getProperty("os.name").lowercase()
         val arch = System.getProperty("os.arch")
 
